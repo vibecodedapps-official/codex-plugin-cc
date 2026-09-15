@@ -39,6 +39,33 @@ function now() {
   return Math.floor(Date.now() / 1000);
 }
 
+const SANDBOX_TYPE_BY_REQUEST = {
+  "read-only": "readOnly",
+  "workspace-write": "workspaceWrite",
+  "danger-full-access": "dangerFullAccess"
+};
+
+function resolveEffectiveSandbox(requestedSandbox) {
+  if (BEHAVIOR === "sandbox-downgrade" && requestedSandbox === "workspace-write") {
+    return { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false };
+  }
+  const type = SANDBOX_TYPE_BY_REQUEST[requestedSandbox] || "readOnly";
+  return { type, access: { type: "fullAccess" }, networkAccess: type !== "readOnly" };
+}
+
+// The plugin now decides approvalPolicy before ever sending thread/start, by reading
+// config.toml itself, so the fixture just echoes back whatever was sent (or the value
+// Codex would resolve from config when the field was omitted).
+function resolveEffectiveApprovalPolicy(requestedApprovalPolicy) {
+  return requestedApprovalPolicy || "on-request";
+}
+
+// When the plugin omitted approvalPolicy, it decided (from config.toml) that a
+// reviewer is configured, so mirror that back the way the real app-server does.
+function resolveApprovalsReviewer(requestedApprovalPolicy) {
+  return requestedApprovalPolicy ? null : "auto_review";
+}
+
 function buildThread(thread) {
   return {
     id: thread.id,
@@ -313,7 +340,14 @@ rl.on("line", (line) => {
           throw new Error("thread/start.persistFullHistory requires experimentalApi capability");
         }
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        state.lastThreadStart = {
+          cwd: message.params.cwd,
+          sandbox: message.params.sandbox ?? null,
+          approvalPolicy: Object.prototype.hasOwnProperty.call(message.params, "approvalPolicy") ? message.params.approvalPolicy : null,
+          approvalPolicyOmitted: !Object.prototype.hasOwnProperty.call(message.params, "approvalPolicy")
+        };
+        saveState(state);
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: resolveEffectiveApprovalPolicy(message.params.approvalPolicy), approvalsReviewer: resolveApprovalsReviewer(message.params.approvalPolicy), sandbox: resolveEffectiveSandbox(message.params.sandbox), reasoningEffort: null } });
         send({ method: "thread/started", params: { thread: { id: thread.id } } });
         break;
       }
@@ -346,8 +380,14 @@ rl.on("line", (line) => {
         }
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
+        state.lastThreadResume = {
+          threadId: message.params.threadId,
+          sandbox: message.params.sandbox ?? null,
+          approvalPolicy: Object.prototype.hasOwnProperty.call(message.params, "approvalPolicy") ? message.params.approvalPolicy : null,
+          approvalPolicyOmitted: !Object.prototype.hasOwnProperty.call(message.params, "approvalPolicy")
+        };
         saveState(state);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: resolveEffectiveApprovalPolicy(message.params.approvalPolicy), approvalsReviewer: resolveApprovalsReviewer(message.params.approvalPolicy), sandbox: resolveEffectiveSandbox(message.params.sandbox), reasoningEffort: null } });
         break;
       }
 
@@ -653,6 +693,10 @@ export function buildEnv(binDir) {
   const sep = process.platform === "win32" ? ";" : ":";
   return {
     ...process.env,
-    PATH: `${binDir}${sep}${process.env.PATH}`
+    PATH: `${binDir}${sep}${process.env.PATH}`,
+    // Isolate from the real machine's ~/.codex/config.toml (which may set
+    // approvals_reviewer) so approval-policy resolution is deterministic in tests.
+    // Callers that need a specific config.toml override this afterwards.
+    CODEX_HOME: path.join(binDir, "fake-codex-home")
   };
 }
