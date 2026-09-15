@@ -32,6 +32,8 @@ Forwarding rules:
 - If the user asks for a concrete model name such as `gpt-5.4-mini`, pass it through with `--model`.
 - Treat `--effort <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
 - Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
+- Treat `--cwd <path>` as a routing control and do not include it in the task text you pass through. Forward it to `task` as-is.
+- `--danger-full-access` is a user-only escalation flag. Forward `--danger-full-access` to `task` only when the user's own request literally includes that flag. Never add `--danger-full-access` on your own initiative for any reason, including when a run fails with a sandbox-mismatch error that suggests it — surface that failure to the user instead and let them decide.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
 - `--resume` means add `--resume-last`.
 - `--fresh` means do not add `--resume-last`.

@@ -151,7 +151,7 @@ function pushJobDetails(lines, job, options = {}) {
   if (job.status !== "queued" && job.status !== "running" && options.showResultHint) {
     lines.push(`  Result: /codex:result ${job.id}`);
   }
-  if (job.status !== "queued" && job.status !== "running" && job.jobClass === "task" && job.write && options.showReviewHint) {
+  if (job.status !== "queued" && job.status !== "running" && job.jobClass === "task" && job.write && job.sandbox && options.showReviewHint) {
     lines.push("  Review changes: /codex:review --wait");
     lines.push("  Stricter review: /codex:adversarial-review --wait");
   }
@@ -313,13 +313,16 @@ export function renderNativeReviewResult(result, meta) {
 }
 
 export function renderTaskResult(parsedResult, meta) {
+  const warning = meta?.dangerFullAccess
+    ? "WARNING: this run had no sandbox (--danger-full-access).\n\n"
+    : "";
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   if (rawOutput) {
-    return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    return `${warning}${rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`}`;
   }
 
   const message = String(parsedResult?.failureMessage ?? "").trim() || "Codex did not return a final message.";
-  return `${message}\n`;
+  return `${warning}${message}\n`;
 }
 
 export function renderStatusReport(report) {

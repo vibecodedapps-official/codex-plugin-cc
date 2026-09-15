@@ -59,27 +59,98 @@ function cleanCodexStderr(stderr) {
     .join("\n");
 }
 
+// Only "auto_review" can actually answer an approval request without a human. Other
+// values (e.g. "user", meaning "ask the human") leave the plugin unable to service an
+// approval, since `handleServerRequest` always rejects with -32601.
+const AUTO_REVIEWER_VALUE_PATTERN = /^\s*approvals_reviewer\s*=\s*"?auto_review"?\s*(#.*)?$/m;
+
+/**
+ * Scans config.toml for a top-level `approvals_reviewer = "auto_review"` setting
+ * without doing full TOML parsing. Only the region before the first `[section]`
+ * header counts as top-level. Any failure to read the file, or an absent/non-automated
+ * value (including "user"), is treated as "no reviewer configured", which matches the
+ * pre-existing default behavior (approvalPolicy "never").
+ */
+function isApprovalsReviewerConfigured() {
+  try {
+    const configPath = path.join(resolveCodexHome(), "config.toml");
+    const contents = fs.readFileSync(configPath, "utf8");
+    const firstSectionIndex = contents.search(/^\s*\[/m);
+    const topLevel = firstSectionIndex === -1 ? contents : contents.slice(0, firstSectionIndex);
+    return AUTO_REVIEWER_VALUE_PATTERN.test(topLevel);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns the approvalPolicy to send, or undefined to omit the field and let Codex
+ * resolve it from config.toml. When the caller didn't request a policy and no
+ * approvals reviewer is configured, defaults to "never" so an unanswerable approval
+ * request can never reach `handleServerRequest` (which always rejects with -32601).
+ * This decision is made before `thread/start`/`thread/resume` so no throwaway thread
+ * is ever created.
+ */
+function resolveApprovalPolicyOption(requestedApprovalPolicy) {
+  if (requestedApprovalPolicy != null) {
+    return requestedApprovalPolicy;
+  }
+  return isApprovalsReviewerConfigured() ? undefined : "never";
+}
+
 /** @returns {ThreadStartParams} */
 function buildThreadParams(cwd, options = {}) {
-  return {
+  const params = {
     cwd,
     model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: options.sandbox ?? "read-only",
     serviceName: SERVICE_NAME,
     ephemeral: options.ephemeral ?? true
   };
+  const approvalPolicy = resolveApprovalPolicyOption(options.approvalPolicy);
+  if (approvalPolicy != null) {
+    params.approvalPolicy = approvalPolicy;
+  }
+  return params;
 }
 
 /** @returns {ThreadResumeParams} */
 function buildResumeParams(threadId, cwd, options = {}) {
-  return {
+  const params = {
     threadId,
     cwd,
     model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
     sandbox: options.sandbox ?? "read-only"
   };
+  const approvalPolicy = resolveApprovalPolicyOption(options.approvalPolicy);
+  if (approvalPolicy != null) {
+    params.approvalPolicy = approvalPolicy;
+  }
+  return params;
+}
+
+const SANDBOX_TYPE_BY_REQUEST = {
+  "read-only": "readOnly",
+  "workspace-write": "workspaceWrite",
+  "danger-full-access": "dangerFullAccess"
+};
+
+function assertEffectiveSandbox(requestedSandbox, response, cwd) {
+  const expectedType = SANDBOX_TYPE_BY_REQUEST[requestedSandbox];
+  const effectiveType = response?.sandbox?.type ?? null;
+  if (!expectedType || !effectiveType || effectiveType === expectedType) {
+    return;
+  }
+
+  const versionStatus = binaryAvailable("codex", ["--version"], { cwd });
+  const versionLabel = versionStatus.available ? versionStatus.detail : "an unknown codex-cli version";
+  throw new Error(
+    [
+      `Codex reported sandbox "${effectiveType}" but "${requestedSandbox}" was requested.`,
+      `${versionLabel} on ${process.platform} did not honor the requested sandbox for this thread.`,
+      "Re-run with --danger-full-access to proceed with no sandbox, or drop --write."
+    ].join("\n")
+  );
 }
 
 /** @returns {UserInput[]} */
@@ -729,8 +800,24 @@ async function requestExternalAgentSessionImport(client, params) {
   }
 }
 
+function emitApprovalPolicyNote(onProgress, response) {
+  const policy = response?.approvalPolicy ?? null;
+  if (!policy || policy === "never") {
+    return;
+  }
+  const reviewer = response?.approvalsReviewer ?? "none";
+  emitProgress(
+    onProgress,
+    `Thread approval policy resolved to "${policy}" with approvalsReviewer "${reviewer}"; an approval request could run outside the sandbox.`,
+    "starting"
+  );
+}
+
 async function startThread(client, cwd, options = {}) {
   const response = await client.request("thread/start", buildThreadParams(cwd, options));
+  assertEffectiveSandbox(options.sandbox ?? "read-only", response, cwd);
+  emitApprovalPolicyNote(options.onProgress, response);
+
   const threadId = response.thread.id;
   if (options.threadName) {
     try {
@@ -748,7 +835,10 @@ async function startThread(client, cwd, options = {}) {
 }
 
 async function resumeThread(client, threadId, cwd, options = {}) {
-  return client.request("thread/resume", buildResumeParams(threadId, cwd, options));
+  const response = await client.request("thread/resume", buildResumeParams(threadId, cwd, options));
+  assertEffectiveSandbox(options.sandbox ?? "read-only", response, cwd);
+  emitApprovalPolicyNote(options.onProgress, response);
+  return response;
 }
 
 function buildResultStatus(turnState) {
@@ -1011,7 +1101,8 @@ export async function runAppServerReview(cwd, options = {}) {
       model: options.model,
       sandbox: "read-only",
       ephemeral: true,
-      threadName: options.threadName
+      threadName: options.threadName,
+      onProgress: options.onProgress
     });
     const sourceThreadId = thread.thread.id;
     emitProgress(options.onProgress, `Thread ready (${sourceThreadId}).`, "starting", {
@@ -1100,24 +1191,29 @@ export async function runAppServerTurn(cwd, options = {}) {
 
   return withAppServer(cwd, async (client) => {
     let threadId;
+    let effectiveSandbox = null;
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
       const response = await resumeThread(client, options.resumeThreadId, cwd, {
         model: options.model,
         sandbox: options.sandbox,
-        ephemeral: false
+        ephemeral: false,
+        onProgress: options.onProgress
       });
       threadId = response.thread.id;
+      effectiveSandbox = response.sandbox?.type ?? null;
     } else {
       emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
       const response = await startThread(client, cwd, {
         model: options.model,
         sandbox: options.sandbox,
         ephemeral: options.persistThread ? false : true,
-        threadName: options.persistThread ? options.threadName : options.threadName ?? null
+        threadName: options.persistThread ? options.threadName : options.threadName ?? null,
+        onProgress: options.onProgress
       });
       threadId = response.thread.id;
+      effectiveSandbox = response.sandbox?.type ?? null;
     }
 
     emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
@@ -1146,6 +1242,7 @@ export async function runAppServerTurn(cwd, options = {}) {
     return {
       status: buildResultStatus(turnState),
       threadId,
+      sandbox: effectiveSandbox,
       turnId: turnState.turnId,
       finalMessage: turnState.lastAgentMessage,
       reasoningSummary: turnState.reasoningSummary,

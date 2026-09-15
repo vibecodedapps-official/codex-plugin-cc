@@ -2257,3 +2257,317 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
   assert.equal(payload.sessionRuntime.mode, "shared");
   assert.equal(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
 });
+
+test("task --write fails loudly when Codex downgrades the effective sandbox", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "sandbox-downgrade");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--write", "fix the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex reported sandbox "readOnly" but "workspace-write" was requested/);
+  assert.match(result.stderr, /did not honor the requested sandbox for this thread/);
+  assert.match(result.stderr, /Re-run with --danger-full-access to proceed with no sandbox, or drop --write\./);
+});
+
+test("task --write records the effective sandbox when it matches the request", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--write", "--json", "fix the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.sandbox, "workspaceWrite");
+
+  // Read the persisted job record itself (not just the command's stdout payload) to
+  // pin that tracked-jobs.mjs actually writes `sandbox` onto the stored job.
+  const status = run("node", [SCRIPT, "status", "--json"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(status.status, 0, status.stderr);
+  const statusPayload = JSON.parse(status.stdout);
+  assert.equal(statusPayload.latestFinished.sandbox, "workspaceWrite");
+});
+
+test("task --danger-full-access sends the danger-full-access sandbox and implies --write", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const jsonResult = run("node", [SCRIPT, "task", "--danger-full-access", "--json", "fix the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(jsonResult.status, 0, jsonResult.stderr);
+  const payload = JSON.parse(jsonResult.stdout);
+  assert.equal(payload.sandbox, "dangerFullAccess");
+
+  const renderedResult = run("node", [SCRIPT, "task", "--danger-full-access", "fix the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(renderedResult.status, 0, renderedResult.stderr);
+  assert.match(renderedResult.stdout, /WARNING: this run had no sandbox \(--danger-full-access\)\./);
+});
+
+test("task --cwd fails clearly when the resolved path is not an existing directory", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+
+  const missing = path.join(repo, "does-not-exist");
+  const result = run("node", [SCRIPT, "task", "--cwd", missing, "do something"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /does not resolve to an existing directory/);
+});
+
+test("task --cwd forwards a Windows-style path so the run does not silently fall back to process.cwd()", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const elsewhere = makeTempDir();
+  // Pass a single raw-string argv element (as SKILL.md documents the entry point),
+  // so this actually exercises splitRawArgumentString's quoted-path handling, not
+  // Node's own argv array splitting. Invoke via process.execPath (an absolute path)
+  // rather than "node" so helpers.run() does not default to shell:true on Windows —
+  // under a shell, args get re-concatenated and re-split by cmd.exe before Node ever
+  // sees them, which would silently bypass splitRawArgumentString and defeat the
+  // point of this test.
+  const result = run(process.execPath, [SCRIPT, "task", `--cwd "${repo}" do something`], {
+    cwd: elsewhere,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(path.resolve(fakeState.threads[0].cwd), path.resolve(repo));
+});
+
+test("task defaults to approvalPolicy never and creates exactly one thread when config.toml has no approvals_reviewer", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "do the thing"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.threads.length, 1, "no retry should ever happen; the decision is made before thread/start");
+  assert.equal(fakeState.lastThreadStart.approvalPolicy, "never");
+  assert.equal(fakeState.lastThreadStart.approvalPolicyOmitted, false);
+});
+
+test("task omits approvalPolicy up front, without ever creating a throwaway thread, when config.toml configures a reviewer", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const codexHome = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(codexHome, "config.toml"), 'approvals_reviewer = "auto_review"\n', "utf8");
+
+  const result = run("node", [SCRIPT, "task", "do the thing"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_HOME: codexHome
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.threads.length, 1, "reading config up front must not create a throwaway thread before the real one");
+  assert.equal(fakeState.lastThreadStart.approvalPolicyOmitted, true);
+});
+
+test("task ignores an approvals_reviewer key that only appears inside a later [section]", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const codexHome = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(
+    path.join(codexHome, "config.toml"),
+    '[projects."x"]\napprovals_reviewer = "auto_review"\n',
+    "utf8"
+  );
+
+  const result = run("node", [SCRIPT, "task", "do the thing"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_HOME: codexHome
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadStart.approvalPolicy, "never");
+  assert.equal(fakeState.lastThreadStart.approvalPolicyOmitted, false);
+});
+
+test('task defaults to approvalPolicy never when approvals_reviewer is "user" (a human, not an automated reviewer)', () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const codexHome = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(codexHome, "config.toml"), 'approvals_reviewer = "user"\n', "utf8");
+
+  const result = run("node", [SCRIPT, "task", "do the thing"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_HOME: codexHome
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(
+    fakeState.lastThreadStart.approvalPolicy,
+    "never",
+    'approvals_reviewer = "user" means a human answers approvals, not the plugin, so the guard must still send "never"'
+  );
+  assert.equal(fakeState.lastThreadStart.approvalPolicyOmitted, false);
+});
+
+test("task logs the resolved approval policy and reviewer when an automated reviewer changes it from never", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const codexHome = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(codexHome, "config.toml"), 'approvals_reviewer = "auto_review"\n', "utf8");
+
+  const result = run("node", [SCRIPT, "task", "do the thing"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_HOME: codexHome
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Thread approval policy resolved to "on-request" with approvalsReviewer "auto_review"/);
+});
+
+test("task --resume-last also applies the config-resolved approval policy guard on the resume path", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const codexHome = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const firstRun = run("node", [SCRIPT, "task", "initial task"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+
+  const noReviewerResume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(noReviewerResume.status, 0, noReviewerResume.stderr);
+  let fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadResume.approvalPolicy, "never");
+  assert.equal(fakeState.lastThreadResume.approvalPolicyOmitted, false);
+
+  fs.writeFileSync(path.join(codexHome, "config.toml"), 'approvals_reviewer = "auto_review"\n', "utf8");
+  const reviewerResume = run("node", [SCRIPT, "task", "--resume-last", "follow up again"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_HOME: codexHome
+    }
+  });
+  assert.equal(reviewerResume.status, 0, reviewerResume.stderr);
+  fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadResume.approvalPolicyOmitted, true);
+});
+
+test("resume-path sandbox mismatch fails loudly with the same actionable message as the start path", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "sandbox-downgrade");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const firstRun = run("node", [SCRIPT, "task", "initial task"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+
+  const result = run("node", [SCRIPT, "task", "--resume-last", "--write", "follow up"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex reported sandbox "readOnly" but "workspace-write" was requested/);
+  assert.match(result.stderr, /did not honor the requested sandbox for this thread/);
+  assert.match(result.stderr, /Re-run with --danger-full-access to proceed with no sandbox, or drop --write\./);
+});

@@ -28,6 +28,8 @@ Command selection:
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, normalize `spark` to `gpt-5.3-codex-spark` and pass it through to `task`.
 - If the forwarded request includes `--effort`, pass it through to `task`.
+- If the forwarded request includes `--cwd <path>`, strip it and the path from the task text and pass `--cwd <path>` through to `task` unchanged.
+- If the forwarded request includes `--danger-full-access`, strip it from the task text and pass it through to `task` unchanged. This flag is user-only: forward it only when the user's own request literally included it. Never add `--danger-full-access` yourself, even when a run fails with a sandbox-mismatch error that suggests it — report that failure to the user instead.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
 - `--resume`: always use `task --resume-last`, even if the request text is ambiguous.
