@@ -45,9 +45,17 @@ const SANDBOX_TYPE_BY_REQUEST = {
   "danger-full-access": "dangerFullAccess"
 };
 
-function resolveEffectiveSandbox(requestedSandbox) {
+function resolveEffectiveSandbox(requestedSandbox, isResume) {
   if (BEHAVIOR === "sandbox-downgrade" && requestedSandbox === "workspace-write") {
     return { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false };
+  }
+  // A null sandbox.type also stands in for a present sandbox object with no type,
+  // since assertEffectiveSandbox treats response?.sandbox?.type the same either way.
+  if (BEHAVIOR === "sandbox-unreported") {
+    return null;
+  }
+  if (BEHAVIOR === "sandbox-unreported-on-resume" && isResume) {
+    return null;
   }
   const type = SANDBOX_TYPE_BY_REQUEST[requestedSandbox] || "readOnly";
   return { type, access: { type: "fullAccess" }, networkAccess: type !== "readOnly" };
@@ -347,7 +355,7 @@ rl.on("line", (line) => {
           approvalPolicyOmitted: !Object.prototype.hasOwnProperty.call(message.params, "approvalPolicy")
         };
         saveState(state);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: resolveEffectiveApprovalPolicy(message.params.approvalPolicy), approvalsReviewer: resolveApprovalsReviewer(message.params.approvalPolicy), sandbox: resolveEffectiveSandbox(message.params.sandbox), reasoningEffort: null } });
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: resolveEffectiveApprovalPolicy(message.params.approvalPolicy), approvalsReviewer: resolveApprovalsReviewer(message.params.approvalPolicy), sandbox: resolveEffectiveSandbox(message.params.sandbox, false), reasoningEffort: null } });
         send({ method: "thread/started", params: { thread: { id: thread.id } } });
         break;
       }
@@ -387,7 +395,7 @@ rl.on("line", (line) => {
           approvalPolicyOmitted: !Object.prototype.hasOwnProperty.call(message.params, "approvalPolicy")
         };
         saveState(state);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: resolveEffectiveApprovalPolicy(message.params.approvalPolicy), approvalsReviewer: resolveApprovalsReviewer(message.params.approvalPolicy), sandbox: resolveEffectiveSandbox(message.params.sandbox), reasoningEffort: null } });
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: resolveEffectiveApprovalPolicy(message.params.approvalPolicy), approvalsReviewer: resolveApprovalsReviewer(message.params.approvalPolicy), sandbox: resolveEffectiveSandbox(message.params.sandbox, true), reasoningEffort: null } });
         break;
       }
 
