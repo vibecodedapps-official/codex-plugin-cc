@@ -52,7 +52,8 @@ async function main() {
   }
 
   const { options } = parseArgs(argv, {
-    valueOptions: ["cwd", "pid-file", "endpoint"]
+    valueOptions: ["cwd", "pid-file", "endpoint"],
+    commandName: "app-server-broker"
   });
 
   if (!options.endpoint) {

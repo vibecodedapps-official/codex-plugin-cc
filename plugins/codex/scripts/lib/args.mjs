@@ -1,3 +1,14 @@
+function throwUnknownOption(rawToken, config) {
+  const supported = [...new Set([...(config.valueOptions ?? []), ...(config.booleanOptions ?? [])])]
+    .sort()
+    .map((name) => `--${name}`)
+    .join(", ");
+  const commandName = config.commandName ?? "this command";
+  throw new Error(
+    `Unknown option "${rawToken}" for ${commandName}. Supported options: ${supported}. Put free text after "--" to pass it through.`
+  );
+}
+
 export function parseArgs(argv, config = {}) {
   const valueOptions = new Set(config.valueOptions ?? []);
   const booleanOptions = new Set(config.booleanOptions ?? []);
@@ -45,8 +56,7 @@ export function parseArgs(argv, config = {}) {
         continue;
       }
 
-      positionals.push(token);
-      continue;
+      throwUnknownOption(token, config);
     }
 
     const shortKey = token.slice(1);
@@ -67,7 +77,7 @@ export function parseArgs(argv, config = {}) {
       continue;
     }
 
-    positionals.push(token);
+    throwUnknownOption(token, config);
   }
 
   return { options, positionals };

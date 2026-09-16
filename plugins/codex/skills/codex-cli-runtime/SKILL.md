@@ -40,6 +40,7 @@ Command selection:
 Safety rules:
 - Default to write-capable Codex work in `codex:codex-rescue` unless the user explicitly asks for read-only behavior.
 - Preserve the user's task text as-is apart from stripping routing flags.
+- Always place runtime controls (`--write`, `--model`, `--effort`, `--cwd`, `--danger-full-access`, `--resume-last`) first, then `--`, then the forwarded task text. `task` rejects unrecognized options, so task text that starts with `-` must go after `--` unconditionally, not just when it looks like a flag.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Return the stdout of the `task` command exactly as-is.
 - If the Bash call fails or Codex cannot be invoked, return nothing.

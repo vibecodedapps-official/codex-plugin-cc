@@ -1,7 +1,67 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { splitRawArgumentString } from "../plugins/codex/scripts/lib/args.mjs";
+import { parseArgs, splitRawArgumentString } from "../plugins/codex/scripts/lib/args.mjs";
+
+test("parseArgs throws naming the unknown long option and the command", () => {
+  assert.throws(
+    () =>
+      parseArgs(["--write"], {
+        valueOptions: ["base"],
+        booleanOptions: ["json"],
+        commandName: "review"
+      }),
+    /^Error: Unknown option "--write" for review\. Supported options: --base, --json\. Put free text after "--" to pass it through\.$/
+  );
+});
+
+test("parseArgs throws naming the unknown short option", () => {
+  assert.throws(
+    () =>
+      parseArgs(["-w"], {
+        booleanOptions: ["json"],
+        commandName: "review"
+      }),
+    /^Error: Unknown option "-w" for review\./
+  );
+});
+
+test("parseArgs keeps tokens after -- as positionals even when they look like options", () => {
+  const { options, positionals } = parseArgs(["--", "--write", "-w"], {
+    booleanOptions: ["write"],
+    commandName: "task"
+  });
+  assert.deepEqual(options, {});
+  assert.deepEqual(positionals, ["--write", "-w"]);
+});
+
+test("parseArgs still parses known options normally", () => {
+  const { options, positionals } = parseArgs(["--base", "main", "--json", "fix", "it"], {
+    valueOptions: ["base"],
+    booleanOptions: ["json"],
+    commandName: "review"
+  });
+  assert.deepEqual(options, { base: "main", json: true });
+  assert.deepEqual(positionals, ["fix", "it"]);
+});
+
+test("parseArgs still resolves an alias to its canonical option", () => {
+  const { options } = parseArgs(["-m", "spark"], {
+    valueOptions: ["model"],
+    aliasMap: { m: "model" },
+    commandName: "task"
+  });
+  assert.deepEqual(options, { model: "spark" });
+});
+
+test("parseArgs keeps a lone - as a positional", () => {
+  const { options, positionals } = parseArgs(["-"], {
+    booleanOptions: ["json"],
+    commandName: "task"
+  });
+  assert.deepEqual(options, {});
+  assert.deepEqual(positionals, ["-"]);
+});
 
 test("splitRawArgumentString keeps backslashes in an unquoted Windows path", () => {
   assert.deepEqual(splitRawArgumentString("C:\\Users\\me\\repo"), ["C:\\Users\\me\\repo"]);

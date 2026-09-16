@@ -215,7 +215,8 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 async function handleSetup(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json", "enable-review-gate", "disable-review-gate"]
+    booleanOptions: ["json", "enable-review-gate", "disable-review-gate"],
+    commandName: "setup"
   });
 
   if (options["enable-review-gate"] && options["disable-review-gate"]) {
@@ -720,7 +721,8 @@ async function handleReviewCommand(argv, config) {
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
-    }
+    },
+    commandName: config.reviewName === "Adversarial Review" ? "adversarial-review" : "review"
   });
 
   const cwd = resolveCommandCwd(options);
@@ -770,7 +772,8 @@ async function handleTask(argv) {
     booleanOptions: ["json", "write", "danger-full-access", "resume-last", "resume", "fresh", "background"],
     aliasMap: {
       m: "model"
-    }
+    },
+    commandName: "task"
   });
 
   const cwd = resolveCommandCwd(options);
@@ -838,7 +841,8 @@ async function handleTask(argv) {
 async function handleTransfer(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "source"],
-    booleanOptions: ["json"]
+    booleanOptions: ["json"],
+    commandName: "transfer"
   });
 
   const cwd = resolveCommandCwd(options);
@@ -850,7 +854,8 @@ async function handleTransfer(argv) {
 
 async function handleTaskWorker(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "job-id"]
+    valueOptions: ["cwd", "job-id"],
+    commandName: "task-worker"
   });
 
   if (!options["job-id"]) {
@@ -896,7 +901,8 @@ async function handleTaskWorker(argv) {
 async function handleStatus(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "timeout-ms", "poll-interval-ms"],
-    booleanOptions: ["json", "all", "wait"]
+    booleanOptions: ["json", "all", "wait"],
+    commandName: "status"
   });
 
   const cwd = resolveCommandCwd(options);
@@ -923,7 +929,8 @@ async function handleStatus(argv) {
 function handleResult(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json"]
+    booleanOptions: ["json"],
+    commandName: "result"
   });
 
   const cwd = resolveCommandCwd(options);
@@ -941,7 +948,8 @@ function handleResult(argv) {
 function handleTaskResumeCandidate(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json"]
+    booleanOptions: ["json"],
+    commandName: "task-resume-candidate"
   });
 
   const cwd = resolveCommandCwd(options);
@@ -976,7 +984,8 @@ function handleTaskResumeCandidate(argv) {
 async function handleCancel(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json"]
+    booleanOptions: ["json"],
+    commandName: "cancel"
   });
 
   const cwd = resolveCommandCwd(options);
