@@ -16,6 +16,19 @@ const SCRIPT = path.join(PLUGIN_ROOT, "scripts", "codex-companion.mjs");
 const STOP_HOOK = path.join(PLUGIN_ROOT, "scripts", "stop-review-gate-hook.mjs");
 const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.mjs");
 
+// The six `setup` tests below read no parent-side state (unlike the broker
+// tests, which call resolveStateDir/loadBrokerSession/saveBrokerSession in
+// the parent and need to share a state dir with the child). Each setup test
+// gets its own CLAUDE_PLUGIN_DATA so a stray state file from one test can't
+// leak into another, and CODEX_COMPANION_APP_SERVER_ENDPOINT is cleared
+// because it takes precedence over broker discovery and could route the
+// test at a real broker left over from the host environment.
+function isolatedSetupEnv(binDir) {
+  const env = { ...buildEnv(binDir), CLAUDE_PLUGIN_DATA: makeTempDir() };
+  delete env.CODEX_COMPANION_APP_SERVER_ENDPOINT;
+  return env;
+}
+
 async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -34,7 +47,7 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0);
@@ -47,14 +60,18 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 test("setup is ready without npm when Codex is already installed and authenticated", () => {
   const binDir = makeTempDir();
   installFakeCodex(binDir);
-  fs.symlinkSync(process.execPath, path.join(binDir, "node"));
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(binDir, "node.cmd"), `@"${process.execPath}" %*\r\n`);
+  } else {
+    fs.symlinkSync(process.execPath, path.join(binDir, "node"));
+  }
+
+  const env = isolatedSetupEnv(binDir);
+  env.PATH = binDir;
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: {
-      ...process.env,
-      PATH: binDir
-    }
+    env
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -71,7 +88,7 @@ test("setup trusts app-server API key auth even when login status alone would fa
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -89,7 +106,7 @@ test("setup is ready when the active provider does not require OpenAI login", ()
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -107,7 +124,7 @@ test("setup treats custom providers with app-server-ready config as ready", () =
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -125,7 +142,7 @@ test("setup reports not ready when app-server config read fails", () => {
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -220,6 +237,7 @@ test("transfer delegates the current Claude session directly to native import", 
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      CLAUDE_CONFIG_DIR: path.join(home, ".claude"),
       CODEX_HOME: path.join(home, ".codex"),
       CODEX_COMPANION_TRANSCRIPT_PATH: sourcePath
     }
@@ -265,6 +283,7 @@ test("transfer reports an actionable upgrade error when native import is unsuppo
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      CLAUDE_CONFIG_DIR: path.join(home, ".claude"),
       CODEX_HOME: path.join(home, ".codex")
     }
   });
@@ -295,6 +314,7 @@ test("transfer fails visibly when native import completes without a ledger recor
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      CLAUDE_CONFIG_DIR: path.join(home, ".claude"),
       CODEX_HOME: path.join(home, ".codex")
     }
   });
@@ -320,7 +340,7 @@ test("transfer rejects sources outside the Claude projects directory", () => {
 
   const result = run("node", [SCRIPT, "transfer", "--source", sourcePath], {
     cwd: repo,
-    env: { ...buildEnv(binDir), HOME: home }
+    env: { ...buildEnv(binDir), HOME: home, CLAUDE_CONFIG_DIR: path.join(home, ".claude") }
   });
 
   assert.notEqual(result.status, 0);
