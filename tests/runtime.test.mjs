@@ -1018,7 +1018,9 @@ test("task with prose after -- forwards only the prose as the prompt", () => {
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const result = run("node", [SCRIPT, "task", "--json --write -- fix the --verbose flag"], {
+  // process.execPath keeps the raw string as one argument; run("node", ...) uses
+  // shell: true on Windows, which would split it before normalizeArgv sees it.
+  const result = run(process.execPath, [SCRIPT, "task", "--json --write -- fix the --verbose flag"], {
     cwd: repo,
     env: buildEnv(binDir)
   });
@@ -2871,6 +2873,10 @@ test("review exits non-zero when the embedded diff would be too large to embed",
   const jsonPayload = JSON.parse(jsonResult.stdout);
   assert.equal(jsonPayload.fallback, null);
   assert.match(jsonPayload.error, /too large to embed \(\d+ bytes, limit 262144\)\. Review a smaller change\./);
+
+  const stored = run("node", [SCRIPT, "result"], { cwd: repo, env: buildEnv(binDir) });
+  assert.match(stored.stdout, /too large to embed/);
+  assert.doesNotMatch(stored.stdout, /No actionable findings/);
 });
 
 test("review lists an oversized untracked file as not embedded when the rest of the diff still fits", () => {
@@ -2891,6 +2897,12 @@ test("review lists an oversized untracked file as not embedded when the rest of 
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Not embedded: big\.txt/);
+
+  const stored = run("node", [SCRIPT, "result"], { cwd: repo, env: buildEnv(binDir) });
+  assert.equal(stored.status, 0, stored.stderr);
+  assert.match(stored.stdout, /Note: no command execution was observed from Codex's built-in reviewer/);
+  assert.match(stored.stdout, /Not embedded: big\.txt/);
+  assert.match(stored.stdout, /Reviewed embedded diff\./);
 });
 
 test("review --json reports fallback: null when no command execution signal fires", () => {

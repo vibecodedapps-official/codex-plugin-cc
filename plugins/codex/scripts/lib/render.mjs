@@ -390,10 +390,21 @@ export function renderJobStatusReport(job) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+// A native review that fell back to an embedded diff, or failed after observing no
+// command execution, carries its note or error only in the rendered output. Raw
+// `codex.stdout` would resurface the discarded first verdict.
+function isNativeReviewWithFallbackOrError(storedJob) {
+  const result = storedJob?.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return false;
+  }
+  return Boolean(result.fallback) || typeof result.error === "string";
+}
+
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
-  if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
+  if ((isStructuredReviewStoredResult(storedJob) || isNativeReviewWithFallbackOrError(storedJob)) && storedJob?.rendered) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
     if (!threadId) {
       return output;
