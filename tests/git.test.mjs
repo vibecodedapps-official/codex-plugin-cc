@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import process from "node:process";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectReviewContext, resolveReviewTarget } from "../plugins/codex/scripts/lib/git.mjs";
+import { collectReviewContext, listOmittedContextEntries, resolveReviewTarget } from "../plugins/codex/scripts/lib/git.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {
@@ -132,13 +133,21 @@ test("collectReviewContext skips untracked directories in working tree review", 
   assert.match(context.content, /### \.claude\/worktrees\/agent-test\/\n\(skipped: directory\)/);
 });
 
-test("collectReviewContext skips broken untracked symlinks instead of crashing", () => {
+test("collectReviewContext skips broken untracked symlinks instead of crashing", (t) => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
   run("git", ["add", "app.js"], { cwd });
   run("git", ["commit", "-m", "init"], { cwd });
-  fs.symlinkSync("missing-target", path.join(cwd, "broken-link"));
+  try {
+    fs.symlinkSync("missing-target", path.join(cwd, "broken-link"));
+  } catch (error) {
+    if (process.platform === "win32" && error.code === "EPERM") {
+      t.skip("creating symlinks on Windows needs Developer Mode or elevation");
+      return;
+    }
+    throw error;
+  }
 
   const target = resolveReviewTarget(cwd, {});
   const context = collectReviewContext(cwd, target);
@@ -209,4 +218,50 @@ test("collectReviewContext keeps untracked file content in lightweight working t
   assert.doesNotMatch(context.content, /TRACKED_MARKER_[AB]/);
   assert.match(context.content, /## Untracked Files/);
   assert.match(context.content, /UNTRACKED_RISK_MARKER/);
+});
+
+test("listOmittedContextEntries parses size-limit and binary-file skips out of collected context", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+
+  fs.writeFileSync(path.join(cwd, "big.txt"), "x".repeat(25 * 1024));
+  fs.writeFileSync(path.join(cwd, "binary.bin"), Buffer.from([0, 1, 2, 3, 0, 5, 6]));
+
+  const target = resolveReviewTarget(cwd, { scope: "working-tree" });
+  const context = collectReviewContext(cwd, target, { includeDiff: true });
+
+  const omitted = listOmittedContextEntries(context.content);
+  const byReason = Object.fromEntries(omitted.map((entry) => [entry.reason, entry.path]));
+
+  assert.equal(byReason["25600 bytes exceeds 24576 byte limit"], "big.txt");
+  assert.equal(byReason["binary file"], "binary.bin");
+});
+
+test("listOmittedContextEntries reports directories with a trailing slash", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+
+  const nestedRepoDir = path.join(cwd, ".claude", "worktrees", "agent-test");
+  fs.mkdirSync(nestedRepoDir, { recursive: true });
+  initGitRepo(nestedRepoDir);
+
+  const target = resolveReviewTarget(cwd, { scope: "working-tree" });
+  const context = collectReviewContext(cwd, target);
+
+  const omitted = listOmittedContextEntries(context.content);
+
+  assert.deepEqual(omitted, [{ path: ".claude/worktrees/agent-test/", reason: "directory" }]);
+});
+
+test("listOmittedContextEntries reports broken symlinks / unreadable files", () => {
+  const content = ["### dangling-link", "(skipped: broken symlink or unreadable file)"].join("\n");
+  assert.deepEqual(listOmittedContextEntries(content), [
+    { path: "dangling-link", reason: "broken symlink or unreadable file" }
+  ]);
 });

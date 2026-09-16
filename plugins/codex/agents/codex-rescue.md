@@ -40,6 +40,7 @@ Forwarding rules:
 - If the user is clearly asking to continue prior Codex work in this repository, such as "continue", "keep going", "resume", "apply the top fix", or "dig deeper", add `--resume-last` unless `--fresh` is present.
 - Otherwise forward the task as a fresh `task` run.
 - Preserve the user's task text as-is apart from stripping routing flags.
+- Always place every runtime flag (`--write`, `--model`, `--effort`, `--cwd`, `--danger-full-access`, `--resume-last`) before `--`, then put the forwarded task text after `--`. This keeps task text that happens to start with `-` from being parsed as an option.
 - Return the stdout of the `codex-companion` command exactly as-is.
 - If the Bash call fails or Codex cannot be invoked, return nothing.
 

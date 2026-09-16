@@ -54,6 +54,15 @@ function looksLikeMissingProcessMessage(text) {
   return /not found|no running instance|cannot find|does not exist|no such process/i.test(text);
 }
 
+function processExists(pid, killImpl) {
+  try {
+    killImpl(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
 export function terminateProcessTree(pid, options = {}) {
   if (!Number.isFinite(pid)) {
     return { attempted: false, delivered: false, method: null };
@@ -76,6 +85,13 @@ export function terminateProcessTree(pid, options = {}) {
     const combinedOutput = `${result.stderr}\n${result.stdout}`.trim();
     if (!result.error && looksLikeMissingProcessMessage(combinedOutput)) {
       return { attempted: true, delivered: false, method: "taskkill", result };
+    }
+
+    // taskkill exits non-zero when any member of the tree could not be terminated,
+    // including children that were already exiting. Only the root pid matters here:
+    // if it is gone, the kill was delivered.
+    if (!result.error && !processExists(pid, killImpl)) {
+      return { attempted: true, delivered: true, method: "taskkill", result };
     }
 
     if (result.error?.code === "ENOENT") {

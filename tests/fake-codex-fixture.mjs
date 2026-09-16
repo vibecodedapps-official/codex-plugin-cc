@@ -453,6 +453,8 @@ rl.on("line", (line) => {
       }
 
       case "review/start": {
+        state.reviewStartCount = (state.reviewStartCount || 0) + 1;
+        saveState(state);
         const thread = ensureThread(state, message.params.threadId);
         let reviewThread = thread;
         if (message.params.delivery === "detached") {
@@ -460,10 +462,99 @@ rl.on("line", (line) => {
           send({ method: "thread/started", params: { thread: { id: reviewThread.id } } });
         }
         const turnId = nextTurnId(state);
+        const isCustomTarget = message.params.target && message.params.target.type === "custom";
+        const noCommandBehaviors = [
+          "review-no-commands",
+          "review-declined-commands",
+          "review-no-commands-fallback-empty",
+          "review-no-commands-failed-turn"
+        ];
+
+        if (noCommandBehaviors.includes(BEHAVIOR) && isCustomTarget) {
+          state.lastCustomReviewInstructions = message.params.target.instructions;
+          saveState(state);
+          send({ id: message.id, result: { turn: buildTurn(turnId), reviewThreadId: reviewThread.id } });
+          const reviewText = BEHAVIOR === "review-no-commands-fallback-empty" ? "" : "Reviewed embedded diff.\\nFinding: ...";
+          emitTurnCompleted(reviewThread.id, turnId, [
+            { started: { type: "enteredReviewMode", id: turnId, review: "current changes" } },
+            { completed: { type: "exitedReviewMode", id: turnId, review: reviewText } }
+          ]);
+          break;
+        }
+
+        if (BEHAVIOR === "review-no-commands-failed-turn") {
+          send({ id: message.id, result: { turn: buildTurn(turnId), reviewThreadId: reviewThread.id } });
+          send({ method: "turn/started", params: { threadId: reviewThread.id, turn: buildTurn(turnId) } });
+          send({
+            method: "item/started",
+            params: { threadId: reviewThread.id, turnId, item: { type: "enteredReviewMode", id: turnId, review: "current changes" } }
+          });
+          send({
+            method: "turn/completed",
+            params: { threadId: reviewThread.id, turn: buildTurn(turnId, "failed", { message: "Codex could not complete the review." }) }
+          });
+          break;
+        }
+
+        if (BEHAVIOR === "review-no-commands" || BEHAVIOR === "review-declined-commands" || BEHAVIOR === "review-no-commands-fallback-empty") {
+          send({ id: message.id, result: { turn: buildTurn(turnId), reviewThreadId: reviewThread.id } });
+          const commandItems =
+            BEHAVIOR === "review-declined-commands"
+              ? [
+                  {
+                    started: {
+                      type: "commandExecution",
+                      id: "cmd_" + turnId,
+                      command: "git diff",
+                      cwd: reviewThread.cwd,
+                      status: "inProgress"
+                    },
+                    completed: {
+                      type: "commandExecution",
+                      id: "cmd_" + turnId,
+                      command: "git diff",
+                      cwd: reviewThread.cwd,
+                      status: "declined",
+                      exitCode: null
+                    }
+                  }
+                ]
+              : [];
+          emitTurnCompleted(reviewThread.id, turnId, [
+            { started: { type: "enteredReviewMode", id: turnId, review: "current changes" } },
+            ...commandItems,
+            {
+              completed: {
+                type: "exitedReviewMode",
+                id: turnId,
+                review: "No actionable findings. Command execution was rejected."
+              }
+            }
+          ]);
+          break;
+        }
+
         send({ id: message.id, result: { turn: buildTurn(turnId), reviewThreadId: reviewThread.id } });
         emitTurnCompleted(reviewThread.id, turnId, [
           {
             started: { type: "enteredReviewMode", id: turnId, review: "current changes" }
+          },
+          {
+            started: {
+              type: "commandExecution",
+              id: "cmd_" + turnId,
+              command: "git diff",
+              cwd: reviewThread.cwd,
+              status: "inProgress"
+            },
+            completed: {
+              type: "commandExecution",
+              id: "cmd_" + turnId,
+              command: "git diff",
+              cwd: reviewThread.cwd,
+              status: "completed",
+              exitCode: 0
+            }
           },
           ...(BEHAVIOR === "with-reasoning"
             ? [

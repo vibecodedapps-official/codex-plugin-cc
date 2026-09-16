@@ -16,6 +16,19 @@ const SCRIPT = path.join(PLUGIN_ROOT, "scripts", "codex-companion.mjs");
 const STOP_HOOK = path.join(PLUGIN_ROOT, "scripts", "stop-review-gate-hook.mjs");
 const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.mjs");
 
+// The six `setup` tests below read no parent-side state (unlike the broker
+// tests, which call resolveStateDir/loadBrokerSession/saveBrokerSession in
+// the parent and need to share a state dir with the child). Each setup test
+// gets its own CLAUDE_PLUGIN_DATA so a stray state file from one test can't
+// leak into another, and CODEX_COMPANION_APP_SERVER_ENDPOINT is cleared
+// because it takes precedence over broker discovery and could route the
+// test at a real broker left over from the host environment.
+function isolatedSetupEnv(binDir) {
+  const env = { ...buildEnv(binDir), CLAUDE_PLUGIN_DATA: makeTempDir() };
+  delete env.CODEX_COMPANION_APP_SERVER_ENDPOINT;
+  return env;
+}
+
 async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -34,7 +47,7 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0);
@@ -47,14 +60,18 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
 test("setup is ready without npm when Codex is already installed and authenticated", () => {
   const binDir = makeTempDir();
   installFakeCodex(binDir);
-  fs.symlinkSync(process.execPath, path.join(binDir, "node"));
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(binDir, "node.cmd"), `@"${process.execPath}" %*\r\n`);
+  } else {
+    fs.symlinkSync(process.execPath, path.join(binDir, "node"));
+  }
+
+  const env = isolatedSetupEnv(binDir);
+  env.PATH = binDir;
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: {
-      ...process.env,
-      PATH: binDir
-    }
+    env
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -71,7 +88,7 @@ test("setup trusts app-server API key auth even when login status alone would fa
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -89,7 +106,7 @@ test("setup is ready when the active provider does not require OpenAI login", ()
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -107,7 +124,7 @@ test("setup treats custom providers with app-server-ready config as ready", () =
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -125,7 +142,7 @@ test("setup reports not ready when app-server config read fails", () => {
 
   const result = run("node", [SCRIPT, "setup", "--json"], {
     cwd: ROOT,
-    env: buildEnv(binDir)
+    env: isolatedSetupEnv(binDir)
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -220,6 +237,7 @@ test("transfer delegates the current Claude session directly to native import", 
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      CLAUDE_CONFIG_DIR: path.join(home, ".claude"),
       CODEX_HOME: path.join(home, ".codex"),
       CODEX_COMPANION_TRANSCRIPT_PATH: sourcePath
     }
@@ -265,6 +283,7 @@ test("transfer reports an actionable upgrade error when native import is unsuppo
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      CLAUDE_CONFIG_DIR: path.join(home, ".claude"),
       CODEX_HOME: path.join(home, ".codex")
     }
   });
@@ -295,6 +314,7 @@ test("transfer fails visibly when native import completes without a ledger recor
     env: {
       ...buildEnv(binDir),
       HOME: home,
+      CLAUDE_CONFIG_DIR: path.join(home, ".claude"),
       CODEX_HOME: path.join(home, ".codex")
     }
   });
@@ -320,7 +340,7 @@ test("transfer rejects sources outside the Claude projects directory", () => {
 
   const result = run("node", [SCRIPT, "transfer", "--source", sourcePath], {
     cwd: repo,
-    env: { ...buildEnv(binDir), HOME: home }
+    env: { ...buildEnv(binDir), HOME: home, CLAUDE_CONFIG_DIR: path.join(home, ".claude") }
   });
 
   assert.notEqual(result.status, 0);
@@ -967,6 +987,49 @@ test("task --background enqueues a detached worker and exposes per-job status", 
   assert.equal(resultPayload.job.id, launchPayload.jobId);
   assert.equal(resultPayload.job.status, "completed");
   assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
+});
+
+test("review --write exits non-zero with the unknown-option message, not the focus-text message", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "review", "--write"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unknown option "--write" for review/);
+  assert.doesNotMatch(result.stderr, /does not support custom focus text/);
+});
+
+test("task with prose after -- forwards only the prose as the prompt", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // process.execPath keeps the raw string as one argument; run("node", ...) uses
+  // shell: true on Windows, which would split it before normalizeArgv sees it.
+  const result = run(process.execPath, [SCRIPT, "task", "--json --write -- fix the --verbose flag"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastTurnStart.prompt, "fix the --verbose flag");
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.sandbox, "workspaceWrite");
 });
 
 test("review rejects focus text because it is native-review only", () => {
@@ -2373,7 +2436,9 @@ test("task --cwd forwards a Windows-style path so the run does not silently fall
 
   assert.equal(result.status, 0, result.stderr);
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-  assert.equal(path.resolve(fakeState.threads[0].cwd), path.resolve(repo));
+  // realpath on both sides: CI runners hand out an 8.3 short temp path (RUNNER~1)
+  // and the companion forwards the resolved long form.
+  assert.equal(fs.realpathSync.native(fakeState.threads[0].cwd), fs.realpathSync.native(repo));
 });
 
 test("task defaults to approvalPolicy never and creates exactly one thread when config.toml has no approvals_reviewer", () => {
@@ -2675,4 +2740,205 @@ test("task --danger-full-access still succeeds when Codex does not report an eff
   });
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+function setUpReviewRepoWithChange(repo) {
+  initGitRepo(repo);
+  fs.mkdirSync(path.join(repo, "src"));
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 1;\n");
+  run("git", ["add", "src/app.js"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 2;\n");
+}
+
+test("review falls back to an embedded diff when no command execution was observed", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands");
+  setUpReviewRepoWithChange(repo);
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Note: no command execution was observed from Codex's built-in reviewer/);
+  assert.match(result.stdout, /Reviewed embedded diff\./);
+  assert.match(result.stdout, /Finding: /);
+
+  const state = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.match(state.lastCustomReviewInstructions, /export const value = 2;/);
+  assert.match(state.lastCustomReviewInstructions, /No command execution was observed in this environment/);
+});
+
+test("review falls back when the reviewer's commands were declined rather than executed", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-declined-commands");
+  setUpReviewRepoWithChange(repo);
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Note: no command execution was observed from Codex's built-in reviewer/);
+  assert.match(result.stdout, /Reviewed embedded diff\./);
+});
+
+test("review exits non-zero when the fallback review produces no result", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands-fallback-empty");
+  setUpReviewRepoWithChange(repo);
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(result.stdout, /No actionable findings/);
+  assert.match(result.stdout, /Codex's built-in reviewer observed no command execution and the fallback review did not produce a result\./);
+
+  // A separate temp repo so this --json run cannot reuse the broker session the run above
+  // started against the same cwd.
+  const jsonRepo = makeTempDir();
+  const jsonBinDir = makeTempDir();
+  installFakeCodex(jsonBinDir, "review-no-commands-fallback-empty");
+  setUpReviewRepoWithChange(jsonRepo);
+
+  const jsonResult = run("node", [SCRIPT, "review", "--json"], {
+    cwd: jsonRepo,
+    env: buildEnv(jsonBinDir)
+  });
+
+  assert.equal(jsonResult.status, 1);
+  const jsonPayload = JSON.parse(jsonResult.stdout);
+  assert.deepEqual(jsonPayload.fallback, {
+    reason: "no-command-execution-observed",
+    mode: "custom-target-inline-diff",
+    omitted: []
+  });
+  assert.equal(jsonPayload.error, "Codex's built-in reviewer observed no command execution and the fallback review did not produce a result.");
+});
+
+test("review does not retry when the first turn fails outright", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands-failed-turn");
+  setUpReviewRepoWithChange(repo);
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Codex could not complete the review\./);
+
+  const state = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.equal(state.reviewStartCount, 1);
+});
+
+test("review exits non-zero when the embedded diff would be too large to embed", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // An untracked file just over the collector's 24 KiB per-file cap gets skipped and
+  // does not count toward the embedded content; a large tracked change is what pushes
+  // the combined embedded context over the 256 KiB fallback bound.
+  fs.writeFileSync(path.join(repo, "notes.txt"), "x".repeat(25 * 1024));
+  fs.writeFileSync(path.join(repo, "README.md"), "y".repeat(300 * 1024));
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /too large to embed \(\d+ bytes, limit 262144\)\. Review a smaller change\./);
+
+  const jsonResult = run("node", [SCRIPT, "review", "--json"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(jsonResult.status, 1);
+  const jsonPayload = JSON.parse(jsonResult.stdout);
+  assert.equal(jsonPayload.fallback, null);
+  assert.match(jsonPayload.error, /too large to embed \(\d+ bytes, limit 262144\)\. Review a smaller change\./);
+
+  const stored = run("node", [SCRIPT, "result"], { cwd: repo, env: buildEnv(binDir) });
+  assert.match(stored.stdout, /too large to embed/);
+  assert.doesNotMatch(stored.stdout, /No actionable findings/);
+});
+
+test("review lists an oversized untracked file as not embedded when the rest of the diff still fits", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  fs.writeFileSync(path.join(repo, "big.txt"), "z".repeat(30 * 1024));
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Not embedded: big\.txt/);
+
+  const stored = run("node", [SCRIPT, "result"], { cwd: repo, env: buildEnv(binDir) });
+  assert.equal(stored.status, 0, stored.stderr);
+  assert.match(stored.stdout, /Note: no command execution was observed from Codex's built-in reviewer/);
+  assert.match(stored.stdout, /Not embedded: big\.txt/);
+  assert.match(stored.stdout, /Reviewed embedded diff\./);
+});
+
+test("review --json reports fallback: null when no command execution signal fires", () => {
+  const repo = makeTempDir();
+  const cleanBinDir = makeTempDir();
+  installFakeCodex(cleanBinDir, "review-ok");
+  setUpReviewRepoWithChange(repo);
+
+  const cleanResult = run("node", [SCRIPT, "review", "--json"], {
+    cwd: repo,
+    env: buildEnv(cleanBinDir)
+  });
+  assert.equal(cleanResult.status, 0, cleanResult.stderr);
+  const cleanPayload = JSON.parse(cleanResult.stdout);
+  assert.equal(cleanPayload.fallback, null);
+});
+
+test("review --json reports the fallback object when it fired", () => {
+  // A separate repo (not just a separate fake-codex binDir) so this run cannot reuse a
+  // broker session an earlier test started against the same cwd with a different behavior.
+  const repo = makeTempDir();
+  const fallbackBinDir = makeTempDir();
+  installFakeCodex(fallbackBinDir, "review-no-commands");
+  setUpReviewRepoWithChange(repo);
+
+  const fallbackResult = run("node", [SCRIPT, "review", "--json"], {
+    cwd: repo,
+    env: buildEnv(fallbackBinDir)
+  });
+  assert.equal(fallbackResult.status, 0, fallbackResult.stderr);
+  const fallbackPayload = JSON.parse(fallbackResult.stdout);
+  assert.deepEqual(fallbackPayload.fallback, {
+    reason: "no-command-execution-observed",
+    mode: "custom-target-inline-diff",
+    omitted: []
+  });
 });

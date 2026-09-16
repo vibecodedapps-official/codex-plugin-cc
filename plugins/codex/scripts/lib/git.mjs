@@ -190,6 +190,23 @@ export function resolveReviewTarget(cwd, options = {}) {
   };
 }
 
+const OMITTED_ENTRY_PATTERN = /^### (.+)$\r?\n^\(skipped: (.+)\)$/gm;
+
+/**
+ * Parses `### <path>\n(skipped: <reason>)` blocks emitted by `formatUntrackedFile`
+ * out of previously-collected review context content.
+ * @param {string} content
+ * @returns {Array<{ path: string, reason: string }>}
+ */
+export function listOmittedContextEntries(content) {
+  const entries = [];
+  for (const match of content.matchAll(OMITTED_ENTRY_PATTERN)) {
+    const [, rawPath, reason] = match;
+    entries.push({ path: rawPath, reason });
+  }
+  return entries;
+}
+
 function formatSection(title, body) {
   return [`## ${title}`, "", body.trim() ? body.trim() : "(none)", ""].join("\n");
 }

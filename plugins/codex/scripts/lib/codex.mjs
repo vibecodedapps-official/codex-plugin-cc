@@ -1159,7 +1159,8 @@ export async function runAppServerReview(cwd, options = {}) {
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
       error: turnState.error,
-      stderr: cleanCodexStderr(client.stderr)
+      stderr: cleanCodexStderr(client.stderr),
+      commandExecutions: turnState.commandExecutions
     };
   });
 }
