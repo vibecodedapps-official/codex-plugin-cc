@@ -2571,3 +2571,108 @@ test("resume-path sandbox mismatch fails loudly with the same actionable message
   assert.match(result.stderr, /did not honor the requested sandbox for this thread/);
   assert.match(result.stderr, /Re-run with --danger-full-access to proceed with no sandbox, or drop --write\./);
 });
+
+test("task fails loudly when Codex does not report an effective sandbox on the default read-only start", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "sandbox-unreported");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "fix the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex did not report an effective sandbox for this thread\./);
+  assert.match(result.stderr, /may be too old to confirm the requested sandbox was honored/);
+  assert.match(result.stderr, /Update Codex so it reports the effective sandbox for each thread\./);
+});
+
+test("task --write fails loudly when Codex does not report an effective sandbox", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "sandbox-unreported");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--write", "fix the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex did not report an effective sandbox for this thread\./);
+  assert.match(result.stderr, /may be too old to confirm the requested sandbox was honored/);
+  assert.match(result.stderr, /Update Codex so it reports the effective sandbox for each thread\./);
+});
+
+test("task --resume-last fails loudly when Codex does not report an effective sandbox on resume", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "sandbox-unreported-on-resume");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const firstRun = run("node", [SCRIPT, "task", "initial task"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+
+  const result = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex did not report an effective sandbox for this thread\./);
+  assert.match(result.stderr, /may be too old to confirm the requested sandbox was honored/);
+  assert.match(result.stderr, /Update Codex so it reports the effective sandbox for each thread\./);
+});
+
+test("review fails loudly when Codex does not report an effective sandbox on its read-only thread", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "sandbox-unreported");
+  initGitRepo(repo);
+  fs.mkdirSync(path.join(repo, "src"));
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 1;\n");
+  run("git", ["add", "src/app.js"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 2;\n");
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex did not report an effective sandbox for this thread\./);
+  assert.match(result.stderr, /may be too old to confirm the requested sandbox was honored/);
+  assert.match(result.stderr, /Update Codex so it reports the effective sandbox for each thread\./);
+});
+
+test("task --danger-full-access still succeeds when Codex does not report an effective sandbox", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "sandbox-unreported");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--danger-full-access", "fix the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});

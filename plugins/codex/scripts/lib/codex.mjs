@@ -137,13 +137,31 @@ const SANDBOX_TYPE_BY_REQUEST = {
 
 function assertEffectiveSandbox(requestedSandbox, response, cwd) {
   const expectedType = SANDBOX_TYPE_BY_REQUEST[requestedSandbox];
+  // response?.sandbox?.type is null both when the field is absent and when it is
+  // present with no type, so this also covers a present-but-empty sandbox object.
   const effectiveType = response?.sandbox?.type ?? null;
-  if (!expectedType || !effectiveType || effectiveType === expectedType) {
+  if (!expectedType || effectiveType === expectedType) {
+    return;
+  }
+
+  if (!effectiveType && requestedSandbox === "danger-full-access") {
+    // The caller already opted out of sandboxing, so there is nothing to verify.
     return;
   }
 
   const versionStatus = binaryAvailable("codex", ["--version"], { cwd });
   const versionLabel = versionStatus.available ? versionStatus.detail : "an unknown codex-cli version";
+
+  if (!effectiveType) {
+    throw new Error(
+      [
+        "Codex did not report an effective sandbox for this thread.",
+        `${versionLabel} on ${process.platform} may be too old to confirm the requested sandbox was honored.`,
+        "Update Codex so it reports the effective sandbox for each thread."
+      ].join("\n")
+    );
+  }
+
   throw new Error(
     [
       `Codex reported sandbox "${effectiveType}" but "${requestedSandbox}" was requested.`,
