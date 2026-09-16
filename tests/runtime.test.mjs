@@ -2737,3 +2737,194 @@ test("task --danger-full-access still succeeds when Codex does not report an eff
 
   assert.equal(result.status, 0, result.stderr);
 });
+
+function setUpReviewRepoWithChange(repo) {
+  initGitRepo(repo);
+  fs.mkdirSync(path.join(repo, "src"));
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 1;\n");
+  run("git", ["add", "src/app.js"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 2;\n");
+}
+
+test("review falls back to an embedded diff when no command execution was observed", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands");
+  setUpReviewRepoWithChange(repo);
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Note: no command execution was observed from Codex's built-in reviewer/);
+  assert.match(result.stdout, /Reviewed embedded diff\./);
+  assert.match(result.stdout, /Finding: /);
+
+  const state = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.match(state.lastCustomReviewInstructions, /export const value = 2;/);
+  assert.match(state.lastCustomReviewInstructions, /No command execution was observed in this environment/);
+});
+
+test("review falls back when the reviewer's commands were declined rather than executed", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-declined-commands");
+  setUpReviewRepoWithChange(repo);
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Note: no command execution was observed from Codex's built-in reviewer/);
+  assert.match(result.stdout, /Reviewed embedded diff\./);
+});
+
+test("review exits non-zero when the fallback review produces no result", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands-fallback-empty");
+  setUpReviewRepoWithChange(repo);
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(result.stdout, /No actionable findings/);
+  assert.match(result.stdout, /Codex's built-in reviewer observed no command execution and the fallback review did not produce a result\./);
+
+  // A separate temp repo so this --json run cannot reuse the broker session the run above
+  // started against the same cwd.
+  const jsonRepo = makeTempDir();
+  const jsonBinDir = makeTempDir();
+  installFakeCodex(jsonBinDir, "review-no-commands-fallback-empty");
+  setUpReviewRepoWithChange(jsonRepo);
+
+  const jsonResult = run("node", [SCRIPT, "review", "--json"], {
+    cwd: jsonRepo,
+    env: buildEnv(jsonBinDir)
+  });
+
+  assert.equal(jsonResult.status, 1);
+  const jsonPayload = JSON.parse(jsonResult.stdout);
+  assert.deepEqual(jsonPayload.fallback, {
+    reason: "no-command-execution-observed",
+    mode: "custom-target-inline-diff",
+    omitted: []
+  });
+  assert.equal(jsonPayload.error, "Codex's built-in reviewer observed no command execution and the fallback review did not produce a result.");
+});
+
+test("review does not retry when the first turn fails outright", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands-failed-turn");
+  setUpReviewRepoWithChange(repo);
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Codex could not complete the review\./);
+
+  const state = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.equal(state.reviewStartCount, 1);
+});
+
+test("review exits non-zero when the embedded diff would be too large to embed", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  // An untracked file just over the collector's 24 KiB per-file cap gets skipped and
+  // does not count toward the embedded content; a large tracked change is what pushes
+  // the combined embedded context over the 256 KiB fallback bound.
+  fs.writeFileSync(path.join(repo, "notes.txt"), "x".repeat(25 * 1024));
+  fs.writeFileSync(path.join(repo, "README.md"), "y".repeat(300 * 1024));
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /too large to embed \(\d+ bytes, limit 262144\)\. Review a smaller change\./);
+
+  const jsonResult = run("node", [SCRIPT, "review", "--json"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(jsonResult.status, 1);
+  const jsonPayload = JSON.parse(jsonResult.stdout);
+  assert.equal(jsonPayload.fallback, null);
+  assert.match(jsonPayload.error, /too large to embed \(\d+ bytes, limit 262144\)\. Review a smaller change\./);
+});
+
+test("review lists an oversized untracked file as not embedded when the rest of the diff still fits", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "review-no-commands");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  fs.writeFileSync(path.join(repo, "big.txt"), "z".repeat(30 * 1024));
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Not embedded: big\.txt/);
+});
+
+test("review --json reports fallback: null when no command execution signal fires", () => {
+  const repo = makeTempDir();
+  const cleanBinDir = makeTempDir();
+  installFakeCodex(cleanBinDir, "review-ok");
+  setUpReviewRepoWithChange(repo);
+
+  const cleanResult = run("node", [SCRIPT, "review", "--json"], {
+    cwd: repo,
+    env: buildEnv(cleanBinDir)
+  });
+  assert.equal(cleanResult.status, 0, cleanResult.stderr);
+  const cleanPayload = JSON.parse(cleanResult.stdout);
+  assert.equal(cleanPayload.fallback, null);
+});
+
+test("review --json reports the fallback object when it fired", () => {
+  // A separate repo (not just a separate fake-codex binDir) so this run cannot reuse a
+  // broker session an earlier test started against the same cwd with a different behavior.
+  const repo = makeTempDir();
+  const fallbackBinDir = makeTempDir();
+  installFakeCodex(fallbackBinDir, "review-no-commands");
+  setUpReviewRepoWithChange(repo);
+
+  const fallbackResult = run("node", [SCRIPT, "review", "--json"], {
+    cwd: repo,
+    env: buildEnv(fallbackBinDir)
+  });
+  assert.equal(fallbackResult.status, 0, fallbackResult.stderr);
+  const fallbackPayload = JSON.parse(fallbackResult.stdout);
+  assert.deepEqual(fallbackPayload.fallback, {
+    reason: "no-command-execution-observed",
+    mode: "custom-target-inline-diff",
+    omitted: []
+  });
+});

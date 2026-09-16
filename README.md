@@ -88,6 +88,8 @@ Use it when you want:
 
 Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
 
+If Codex's built-in reviewer runs no commands in your environment (a known Codex limitation on some platforms, including Windows), the plugin automatically retries once with a locally collected diff embedded directly in the review request instead of silently reporting a clean result.
+
 Examples:
 
 ```bash

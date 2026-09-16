@@ -23,7 +23,7 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { collectReviewContext, ensureGitRepository, listOmittedContextEntries, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -356,6 +356,53 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   return findLatestTaskThread(workspaceRoot);
 }
 
+const NO_COMMAND_EXECUTION_PREAMBLE =
+  "No command execution was observed in this environment. Treat the repository context below as the primary evidence. If something you need is not in it, say so explicitly instead of reporting a clean result.";
+const NO_COMMAND_EXECUTION_FALLBACK_FAILED_MESSAGE =
+  "Codex's built-in reviewer observed no command execution and the fallback review did not produce a result.";
+const MAX_FALLBACK_DIFF_BYTES = 256 * 1024;
+
+function countExecutedCommands(commandExecutions) {
+  return (commandExecutions ?? []).filter((item) => item.status === "completed" || item.status === "failed").length;
+}
+
+// Signal per plan 5.1: the review turn finished normally (status 0, no error, not
+// interrupted) and zero commands with a terminal status were observed. Failed or
+// interrupted turns keep their existing diagnostics and never trigger the retry.
+function noCommandExecutionWasObserved(result) {
+  return result.status === 0 && !result.error && countExecutedCommands(result.commandExecutions) === 0;
+}
+
+function buildNativeReviewPayload(reviewName, target, result, fallback) {
+  return {
+    review: reviewName,
+    target,
+    threadId: result.threadId ?? null,
+    sourceThreadId: result.sourceThreadId ?? null,
+    codex: {
+      status: result.status,
+      stderr: result.stderr,
+      stdout: result.reviewText,
+      reasoning: result.reasoningSummary
+    },
+    fallback
+  };
+}
+
+function buildNoCommandExecutionFailureOutcome({ reviewName, target, result, message, fallback = null }) {
+  return {
+    exitStatus: 1,
+    threadId: result.threadId ?? null,
+    turnId: result.turnId ?? null,
+    payload: { ...buildNativeReviewPayload(reviewName, target, result, fallback), error: message },
+    rendered: `${message}\n`,
+    summary: message,
+    jobTitle: `Codex ${reviewName}`,
+    jobClass: "review",
+    targetLabel: target.label
+  };
+}
+
 async function executeReviewRun(request) {
   ensureCodexAvailable(request.cwd);
   ensureGitRepository(request.cwd);
@@ -373,34 +420,83 @@ async function executeReviewRun(request) {
       model: request.model,
       onProgress: request.onProgress
     });
-    const payload = {
-      review: reviewName,
-      target,
-      threadId: result.threadId,
-      sourceThreadId: result.sourceThreadId,
-      codex: {
-        status: result.status,
-        stderr: result.stderr,
-        stdout: result.reviewText,
-        reasoning: result.reasoningSummary
+
+    if (result.status !== 0 && !result.reviewText?.trim() && result.turn?.error?.message) {
+      result.reviewText = result.turn.error.message;
+    }
+
+    let finalResult = result;
+    let fallback = null;
+    let noteLines = [];
+
+    if (noCommandExecutionWasObserved(result)) {
+      const context = collectReviewContext(request.cwd, target, { includeDiff: true });
+      const omitted = listOmittedContextEntries(context.content);
+      const contentBytes = Buffer.byteLength(context.content);
+
+      if (contentBytes > MAX_FALLBACK_DIFF_BYTES) {
+        const message = `Codex's built-in reviewer observed no command execution and the change is too large to embed (${contentBytes} bytes, limit ${MAX_FALLBACK_DIFF_BYTES}). Review a smaller change.`;
+        return buildNoCommandExecutionFailureOutcome({ reviewName, target, result, message });
       }
-    };
-    const rendered = renderNativeReviewResult(
+
+      request.onProgress?.("No command execution was observed; retrying the review with an embedded diff.");
+
+      const instructionParts = [NO_COMMAND_EXECUTION_PREAMBLE, `Target: ${target.label}`];
+      if (omitted.length > 0) {
+        instructionParts.push(`Not embedded: ${omitted.map((entry) => entry.path).join(", ")}`);
+      }
+      instructionParts.push(context.content);
+
+      const fallbackResult = await runAppServerReview(request.cwd, {
+        target: { type: "custom", instructions: instructionParts.join("\n\n") },
+        model: request.model,
+        onProgress: request.onProgress
+      });
+
+      if (fallbackResult.status !== 0 || !fallbackResult.reviewText?.trim()) {
+        return buildNoCommandExecutionFailureOutcome({
+          reviewName,
+          target,
+          result: fallbackResult,
+          message: NO_COMMAND_EXECUTION_FALLBACK_FAILED_MESSAGE,
+          fallback: {
+            reason: "no-command-execution-observed",
+            mode: "custom-target-inline-diff",
+            omitted
+          }
+        });
+      }
+
+      finalResult = fallbackResult;
+      fallback = {
+        reason: "no-command-execution-observed",
+        mode: "custom-target-inline-diff",
+        omitted
+      };
+      noteLines = ["Note: no command execution was observed from Codex's built-in reviewer, so this review is based on a locally collected diff."];
+      if (omitted.length > 0) {
+        noteLines.push(`Not embedded: ${omitted.map((entry) => entry.path).join(", ")}`);
+      }
+    }
+
+    const payload = buildNativeReviewPayload(reviewName, target, finalResult, fallback);
+    const renderedReview = renderNativeReviewResult(
       {
-        status: result.status,
-        stdout: result.reviewText,
-        stderr: result.stderr
+        status: finalResult.status,
+        stdout: finalResult.reviewText,
+        stderr: finalResult.stderr
       },
-      { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
+      { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: finalResult.reasoningSummary }
     );
+    const rendered = noteLines.length > 0 ? `${noteLines.join("\n")}\n\n${renderedReview}` : renderedReview;
 
     return {
-      exitStatus: result.status,
-      threadId: result.threadId,
-      turnId: result.turnId,
+      exitStatus: finalResult.status,
+      threadId: finalResult.threadId,
+      turnId: finalResult.turnId,
       payload,
       rendered,
-      summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
+      summary: firstMeaningfulLine(finalResult.reviewText, `${reviewName} completed.`),
       jobTitle: `Codex ${reviewName}`,
       jobClass: "review",
       targetLabel: target.label
