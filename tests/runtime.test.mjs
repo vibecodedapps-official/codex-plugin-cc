@@ -2436,7 +2436,9 @@ test("task --cwd forwards a Windows-style path so the run does not silently fall
 
   assert.equal(result.status, 0, result.stderr);
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-  assert.equal(path.resolve(fakeState.threads[0].cwd), path.resolve(repo));
+  // realpath on both sides: CI runners hand out an 8.3 short temp path (RUNNER~1)
+  // and the companion forwards the resolved long form.
+  assert.equal(fs.realpathSync.native(fakeState.threads[0].cwd), fs.realpathSync.native(repo));
 });
 
 test("task defaults to approvalPolicy never and creates exactly one thread when config.toml has no approvals_reviewer", () => {
